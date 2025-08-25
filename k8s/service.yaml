@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: msg-queue
+  namespace: msg-queue
+  labels:
+    app.kubernetes.io/name: msg-queue
+spec:
+  type: ClusterIP
+  ports:
+    - name: grpc
+      port: 9092
+      targetPort: 9092
+  selector:
+    app.kubernetes.io/name: msg-queue

@@ -1,0 +1,253 @@
+0) Prereqs (macOS)
+# Go + protobuf + grpcurl
+brew install go protobuf grpcurl etcd
+
+# Go plugins (make sure $HOME/go/bin is in PATH)
+go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+echo 'export PATH="$HOME/go/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
+
+# Sanity
+go version
+protoc --version
+protoc-gen-go --version
+protoc-gen-go-grpc --version
+
+1) Generate code & build
+
+From your repo root:
+
+# generate stubs
+protoc --go_out=. --go-grpc_out=. proto/mq.proto
+
+# tidy & build
+go mod tidy
+go build ./...
+
+
+If you see mustEmbedUnimplemented... errors, ensure your server type embeds:
+
+type Server struct {
+  proto.UnimplementedMQServer
+  proto.UnimplementedReplicatorServer
+  // ...
+}
+
+2) Start etcd (single node is fine for local)
+etcd --listen-client-urls=http://127.0.0.1:2379 \
+     --advertise-client-urls=http://127.0.0.1:2379
+
+
+Leave it running.
+
+3) Create three broker configs
+
+Create these under ./configs/:
+
+node-a.yaml
+server:
+  nodeId: "node-a"
+  grpcAddr: "127.0.0.1:9092"
+  httpAddr: "127.0.0.1:8080"
+
+storage:
+  dataDir: "./data/node-a"
+  segmentBytes: 134217728 # 128MiB
+
+replication:
+  quorumAcks: 2 # for RF=3, require 2 acks (leader+1)
+
+etcd:
+  endpoints: ["127.0.0.1:2379"]
+  username: ""
+  password: ""
+  tls:
+    enabled: false
+
+node-b.yaml
+server:
+  nodeId: "node-b"
+  grpcAddr: "127.0.0.1:9093"
+  httpAddr: "127.0.0.1:8081"
+
+storage:
+  dataDir: "./data/node-b"
+  segmentBytes: 134217728
+
+replication:
+  quorumAcks: 2
+
+etcd:
+  endpoints: ["127.0.0.1:2379"]
+  username: ""
+  password: ""
+  tls:
+    enabled: false
+
+node-c.yaml
+server:
+  nodeId: "node-c"
+  grpcAddr: "127.0.0.1:9094"
+  httpAddr: "127.0.0.1:8082"
+
+storage:
+  dataDir: "./data/node-c"
+  segmentBytes: 134217728
+
+replication:
+  quorumAcks: 2
+
+etcd:
+  endpoints: ["127.0.0.1:2379"]
+  username: ""
+  password: ""
+  tls:
+    enabled: false
+
+4) Start the three brokers (3 terminals)
+# terminal 1
+go run ./cmd/broker -config ./configs/node-a.yaml
+
+# terminal 2
+go run ./cmd/broker -config ./configs/node-b.yaml
+
+# terminal 3
+go run ./cmd/broker -config ./configs/node-c.yaml
+
+
+Health checks:
+
+curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8080/health/ready
+curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8081/health/ready
+curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8082/health/ready
+
+5) Create a topic (RF=3, partitions=3)
+
+Pick any broker’s gRPC port (they all expose admin). Example uses node-a:
+
+grpcurl -plaintext -d '{"topic":"events","partitions":3,"rf":3}' \
+  127.0.0.1:9092 mq.MQ/CreateTopic
+
+6) Inspect metadata (to learn leaders)
+grpcurl -plaintext -d '{"topics":["events"]}' \
+  127.0.0.1:9092 mq.MQ/Metadata
+
+
+Expected shape:
+
+{
+  "partitions": [
+    {"topic":"events","partition":0,"leader":"node-b","isr":["node-a","node-b","node-c"]},
+    {"topic":"events","partition":1,"leader":"node-a","isr":["node-a","node-b","node-c"]},
+    {"topic":"events","partition":2,"leader":"node-c","isr":["node-a","node-b","node-c"]}
+  ],
+  "brokers": ["node-a","node-b","node-c"]
+}
+
+
+Note the leader (by broker ID) for each partition.
+You need to send Produce/Fetch to the leader’s gRPC address for that partition:
+
+node-a → 127.0.0.1:9092
+
+node-b → 127.0.0.1:9093
+
+node-c → 127.0.0.1:9094
+
+7) Produce messages (to each partition’s leader)
+
+grpcurl encodes bytes as base64. Quick helpers:
+
+KEY=$(printf 'key-1' | base64)         # a2V5LTE=
+VAL=$(printf 'hello world' | base64)   # aGVsbG8gd29ybGQ=
+
+
+Now produce to, say, partition 0 leader (replace target port per metadata):
+
+grpcurl -plaintext -d "{
+  \"topic\":\"events\",
+  \"partition\":1,
+  \"messages\":[{\"key\":\"$KEY\",\"value\":\"$VAL\",\"timestampMs\": $(date +%s000)}]
+}" 127.0.0.1:9093 mq.MQ/Produce
+
+
+Produce to partitions 1 and 2 similarly, adjusting partition and port (per leader).
+
+Expected response includes assigned offsets:
+
+{"partition":0,"offsets":[0]}
+
+8) Fetch messages (from the same partition leader)
+
+Start at offset 0 and fetch up to N messages:
+
+grpcurl -plaintext -d '{"topic":"events","partition":0,"offset":0,"maxMessages":10}' \
+  127.0.0.1:9093 mq.MQ/Fetch
+
+
+You should see your record(s) and a highWatermark ≥ last committed offset.
+
+9) Replication / Quorum behavior smoke test
+
+You configured replication.quorumAcks = 2 and RF=3.
+
+Happy path (all 3 up): produce should succeed.
+
+One follower down: stop either node-b or node-c (Ctrl-C that terminal).
+Produce to the partition’s leader again → it should still succeed (leader + 1 follower ack).
+
+Two followers down: with only the leader up, produce should fail or block (quorum not met).
+
+Fetch is served only by the leader in this starter; followers won’t serve Fetch.
+
+Restart any broker you stopped and produce again to see it recover.
+
+10) Consumer group offsets (optional)
+
+Commit an offset for a group:
+
+grpcurl -plaintext -d '{"groupId":"g1","topic":"events","partition":0,"offset":1}' \
+  127.0.0.1:9093 mq.MQ/CommitOffsets
+
+
+Fetch committed offsets:
+
+grpcurl -plaintext -d '{"groupId":"g1","topic":"events"}' \
+  127.0.0.1:9092 mq.MQ/FetchOffsets
+
+11) Metrics & health
+curl http://127.0.0.1:8080/metrics | head
+curl http://127.0.0.1:8081/metrics | head
+curl http://127.0.0.1:8082/metrics | head
+
+12) Common pitfalls & quick fixes
+
+unknown field ISR... but does have Isr
+Use Isr (Go field names are CamelCase of proto names).
+
+mustEmbedUnimplemented...
+Embed proto.UnimplementedMQServer (and proto.UnimplementedReplicatorServer).
+
+cannot find module providing .../proto before pushing to GitHub
+Add to go.mod:
+
+replace github.com/testorg/msg-queue/proto => ./proto
+
+
+protoc ran but no files generated
+Ensure option go_package = "github.com/testorg/msg-queue/proto;proto";
+exists at the top of mq.proto, and $HOME/go/bin is in PATH.
+
+13) Minimal sanity client (optional)
+
+If you prefer a tiny Go client instead of grpcurl, I can drop a cmd/client/main.go that:
+
+calls Metadata to find leaders,
+
+routes Produce to the right leader,
+
+then Fetch back from the leader.
+
+Say the word and I’ll generate it ready-to-run with your module path.
+
+If anything behaves differently on your machine (e.g., metadata content), paste the exact grpcurl outputs you see and I’ll triage fast.

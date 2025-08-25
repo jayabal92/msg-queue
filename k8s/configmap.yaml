@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: msg-queue-config
+  namespace: msg-queue
+  labels:
+    app.kubernetes.io/name: msg-queue
+    app.kubernetes.io/part-of: msg-queue
+
+
+data:
+  config.yaml: |
+    server:
+      nodeID: "$(POD_NAME)"
+      grpcPort: 9092
+    etcd:
+      endpoints:
+        - http://etcd.default.svc:2379
+      username: ""
+      password: ""
+      tls:
+        enabled: false
+    storage:
+      dataDir: /var/lib/msg-queue
+      segmentBytes: 134217728 # 128MiB
+    replication:
+      quorumAcks: 2
