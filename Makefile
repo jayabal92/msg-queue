@@ -1,12 +1,14 @@
 PROTO_DIR=proto
 
-.PHONY: gen
+.PHONY: proto build run
 
 proto:
-	protoc -I $(PROTO_DIR) --go_out=. --go-grpc_out=. $(PROTO_DIR)/*.proto
+	protoc --go_out=paths=source_relative:. \
+       --go-grpc_out=paths=source_relative:. \
+       ${PROTO_DIR}/*.proto
 
 build: proto
 	go build ./...
 
 run:
-	go run ./cmd/broker -config ./configs/config.yaml
+	go run ./cmd -config ./configs/config.yaml

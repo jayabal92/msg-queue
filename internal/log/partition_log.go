@@ -7,9 +7,12 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+
+	"go.uber.org/zap"
 )
 
 type PartitionLog struct {
+	logger        *zap.Logger
 	Dir           string
 	SegmentBytes  int64
 	mu            sync.RWMutex
@@ -25,11 +28,11 @@ type ReadRecord struct {
 	Data []byte
 }
 
-func OpenPartition(dir string, segmentBytes int64) (*PartitionLog, error) {
+func OpenPartition(dir string, segmentBytes int64, logger *zap.Logger) (*PartitionLog, error) {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return nil, err
 	}
-	pl := &PartitionLog{Dir: dir, SegmentBytes: segmentBytes, highWatermark: -1}
+	pl := &PartitionLog{Dir: dir, SegmentBytes: segmentBytes, highWatermark: -1, logger: logger}
 	if err := pl.load(); err != nil {
 		return nil, err
 	}
@@ -134,7 +137,7 @@ func (p *PartitionLog) load() error {
 		path string
 		base int64
 	}
-	entries := make([]fileEntry, 0, len(files))
+	var entries []fileEntry
 
 	// reset existing slices
 	p.segments = nil
@@ -153,7 +156,7 @@ func (p *PartitionLog) load() error {
 	// sort by numeric base ascending
 	sort.Slice(entries, func(i, j int) bool { return entries[i].base < entries[j].base })
 
-	// open segments in numeric order
+	// open segments & indexes in numeric order
 	for _, e := range entries {
 		seg, err := OpenSegment(e.path, e.base, p.SegmentBytes)
 		if err != nil {
@@ -166,7 +169,6 @@ func (p *PartitionLog) load() error {
 			return err
 		}
 
-		// restore numRecords from index
 		count, err := idx.Count()
 		if err != nil {
 			_ = seg.Close()
@@ -180,9 +182,52 @@ func (p *PartitionLog) load() error {
 		p.baseOffsets = append(p.baseOffsets, e.base)
 	}
 
-	// restore nextOffset & highWatermark
+	// Validate index/segment pairs
+	truncated := false
 	if len(p.segments) > 0 {
-		// choose maximum offset across indexes (robust)
+		for si := 0; si < len(p.segments); si++ {
+			seg := p.segments[si]
+			idx := p.indexes[si]
+
+			if err := idx.Flush(); err != nil {
+				return err
+			}
+
+			it := idx.Iterator()
+			var lastGoodOff int64 = -1
+			var lastGoodEndPos int64 = 0
+
+			for {
+				off, pos, err := it()
+				if err != nil {
+					break // finished this index
+				}
+				rec, nbytes, rerr := seg.ReadAt(pos)
+				if rerr != nil {
+					p.logger.Warn("validation: index points past segment data; truncating",
+						zap.Int("segmentIndex", si),
+						zap.Int64("indexOffset", off),
+						zap.Int64("lastGoodOffset", lastGoodOff),
+						zap.Int64("lastGoodEndPos", lastGoodEndPos),
+						zap.Error(rerr))
+					if terr := p.truncateAt(si, lastGoodOff, lastGoodEndPos); terr != nil {
+						return terr
+					}
+					truncated = true
+					break
+				}
+				lastGoodOff = off
+				lastGoodEndPos = pos + int64(4+len(rec))
+				_ = nbytes // just to silence unused warning
+			}
+			if truncated {
+				break // stop validating after truncation
+			}
+		}
+	}
+
+	// Recompute highWatermark and nextOffset
+	if len(p.segments) > 0 {
 		var maxOff int64 = -1
 		for _, idx := range p.indexes {
 			off, ok, err := idx.LastOffset()
@@ -197,7 +242,6 @@ func (p *PartitionLog) load() error {
 			p.highWatermark = maxOff
 			p.nextOffset = maxOff + 1
 		} else {
-			// no index entries; start from last segment base
 			lastSeg := p.segments[len(p.segments)-1]
 			p.highWatermark = -1
 			p.nextOffset = lastSeg.BaseOffset
@@ -207,8 +251,11 @@ func (p *PartitionLog) load() error {
 		p.nextOffset = 0
 	}
 
-	fmt.Printf("OpenPartition: discovered nextOffset=%d highWatermark=%d segments=%d\n",
-		p.nextOffset, p.highWatermark, len(p.segments))
+	p.logger.Info("OpenPartition loaded",
+		zap.Int64("nextOffset", p.nextOffset),
+		zap.Int64("highWatermark", p.highWatermark),
+		zap.Int("segments", len(p.segments)),
+	)
 
 	return nil
 }
@@ -380,7 +427,7 @@ func (p *PartitionLog) roll(base int64) error {
 // that are not visible on disk.
 //
 // Returns [firstOffset, lastOffset].
-func (p *PartitionLog) AppendBatch_bk(records [][]byte) (int64, int64, error) {
+func (p *PartitionLog) AppendBatch(records [][]byte) (int64, int64, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -425,7 +472,13 @@ func (p *PartitionLog) AppendBatch_bk(records [][]byte) (int64, int64, error) {
 				if e := curSeg.Flush(); e != nil {
 					return 0, 0, e
 				}
+				if e := curSeg.Sync(); e != nil {
+					return 0, 0, e
+				}
 				if e := curIdx.Flush(); e != nil {
+					return 0, 0, e
+				}
+				if e := curIdx.Sync(); e != nil {
 					return 0, 0, e
 				}
 				// New segment base is nextOffset (the offset we were about to write)
@@ -459,7 +512,7 @@ func (p *PartitionLog) AppendBatch_bk(records [][]byte) (int64, int64, error) {
 		p.nextOffset++
 	}
 
-	// Flush all segments that got new bytes this batch (dedup by pointer)
+	// 1) Flush+Sync all segments that got new bytes in this batch
 	seenSeg := make(map[*Segment]struct{}, 2)
 	for _, w := range written {
 		if _, ok := seenSeg[w.seg]; ok {
@@ -468,21 +521,29 @@ func (p *PartitionLog) AppendBatch_bk(records [][]byte) (int64, int64, error) {
 		if err := w.seg.Flush(); err != nil {
 			return 0, 0, err
 		}
+		if err := w.seg.Sync(); err != nil {
+			return 0, 0, err
+		}
 		seenSeg[w.seg] = struct{}{}
 	}
 
-	// Now make the index entries visible (only after segment bytes are durable)
-	seenIdx := make(map[*Index]struct{}, 2)
+	// 2) Append all index entries
 	for _, w := range written {
 		if err := w.idx.Append(w.off, w.pos); err != nil {
 			return 0, 0, err
 		}
 	}
+
+	// 3) Flush+Sync indexes that received entries
+	seenIdx := make(map[*Index]struct{}, 2)
 	for _, w := range written {
 		if _, ok := seenIdx[w.idx]; ok {
 			continue
 		}
 		if err := w.idx.Flush(); err != nil {
+			return 0, 0, err
+		}
+		if err := w.idx.Sync(); err != nil {
 			return 0, 0, err
 		}
 		seenIdx[w.idx] = struct{}{}
@@ -499,7 +560,7 @@ func (p *PartitionLog) AppendBatch_bk(records [][]byte) (int64, int64, error) {
 //   - segment bytes for the batch are flushed before corresponding index entries are made visible.
 //   - supports mid-batch rollovers.
 //   - updates nextOffset and highWatermark.
-func (p *PartitionLog) AppendBatch(records [][]byte) (firstOffset int64, lastOffset int64, err error) {
+func (p *PartitionLog) AppendBatch_bk(records [][]byte) (firstOffset int64, lastOffset int64, err error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -628,8 +689,9 @@ func (p *PartitionLog) ReadFrom_bk(offset int64, max int) ([]ReadRecord, int64, 
 }
 
 // ReadFrom reads records starting at offset up to max (0 = no limit).
-// It locates the starting segment and position using index floor lookup,
-// then scans forward across segments until max or highWatermark is reached.
+// It uses index files to find positions for offsets, ensuring correctness even
+// across segment boundaries. If a segment index points to a truncated/partial
+// record, the function returns whatever it could read; caller sees the HW.
 func (p *PartitionLog) ReadFrom(offset int64, max int) ([]ReadRecord, int64, error) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -639,13 +701,16 @@ func (p *PartitionLog) ReadFrom(offset int64, max int) ([]ReadRecord, int64, err
 		offset = 0
 	}
 	if offset > hw {
+		p.logger.Debug("readfrom: offset beyond HW",
+			zap.Int64("offset", offset),
+			zap.Int64("hw", p.highWatermark))
 		return nil, hw, io.EOF
 	}
 
 	var res []ReadRecord
 	remaining := max
 
-	// find first segment with base <= offset
+	// find the segment that may contain offset
 	startSeg := 0
 	for i := len(p.baseOffsets) - 1; i >= 0; i-- {
 		if p.baseOffsets[i] <= offset {
@@ -654,34 +719,41 @@ func (p *PartitionLog) ReadFrom(offset int64, max int) ([]ReadRecord, int64, err
 		}
 	}
 
-	curOff := p.baseOffsets[startSeg]
 	for si := startSeg; si < len(p.segments); si++ {
 		seg := p.segments[si]
+		idx := p.indexes[si]
 
-		pos := int64(0)
+		// Ensure buffered bytes are visible to readers
+		_ = seg.Flush()
+		_ = idx.Flush()
+
+		it := idx.Iterator()
 		for {
-			rec, nextPos, err := seg.ReadAt(pos)
+			off, pos, err := it()
 			if err != nil {
-				break // EOF of this segment
+				// iterator finished
+				break
 			}
-			if curOff >= offset {
-				if curOff > hw {
+			if off < offset {
+				continue
+			}
+			// do not read beyond HW
+			if off > hw {
+				return res, hw, nil
+			}
+			rec, _, rerr := seg.ReadAt(pos)
+			if rerr != nil {
+				// truncated or partial record — stop here and return
+				p.logger.Warn("segment read at index pos failed", zap.Int64("off", off), zap.Any("pos", pos), zap.Error(rerr))
+				return res, hw, nil
+			}
+			res = append(res, ReadRecord{Off: off, Data: rec})
+			if remaining > 0 {
+				remaining--
+				if remaining == 0 {
 					return res, hw, nil
 				}
-				res = append(res, ReadRecord{Off: curOff, Data: rec})
-				if remaining > 0 {
-					remaining--
-					if remaining == 0 {
-						return res, hw, nil
-					}
-				}
 			}
-			curOff++
-			pos = nextPos
-		}
-		// move offset to next segment base
-		if si+1 < len(p.baseOffsets) {
-			curOff = p.baseOffsets[si+1]
 		}
 	}
 

@@ -5,6 +5,8 @@ import (
 	"io"
 	"sync"
 	"testing"
+
+	"go.uber.org/zap"
 )
 
 type dummyMsg struct {
@@ -22,8 +24,9 @@ func mkBatch(n int) [][]byte {
 }
 
 func TestAppendRead_Basic(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
 	dir := t.TempDir()
-	pl, err := OpenPartition(dir, 1<<20)
+	pl, err := OpenPartition(dir, 1<<20, logger)
 	if err != nil {
 		t.Fatalf("OpenPartition: %v", err)
 	}
@@ -50,9 +53,10 @@ func TestAppendRead_Basic(t *testing.T) {
 }
 
 func TestAppendRead_Rollover(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
 	dir := t.TempDir()
 	// small segment to force 5 rollovers easily
-	pl, err := OpenPartition(dir, 128)
+	pl, err := OpenPartition(dir, 128, logger)
 	if err != nil {
 		t.Fatalf("OpenPartition: %v", err)
 	}
@@ -76,8 +80,9 @@ func TestAppendRead_Rollover(t *testing.T) {
 }
 
 func TestRead_MaxLimit(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
 	dir := t.TempDir()
-	pl, err := OpenPartition(dir, 1<<20)
+	pl, err := OpenPartition(dir, 1<<20, logger)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,8 +105,9 @@ func TestRead_MaxLimit(t *testing.T) {
 }
 
 func TestRead_FromMiddle(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
 	dir := t.TempDir()
-	pl, err := OpenPartition(dir, 256)
+	pl, err := OpenPartition(dir, 256, logger)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,8 +128,9 @@ func TestRead_FromMiddle(t *testing.T) {
 }
 
 func TestRead_OffsetBeyondHW_EOF(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
 	dir := t.TempDir()
-	pl, err := OpenPartition(dir, 1<<20)
+	pl, err := OpenPartition(dir, 1<<20, logger)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,8 +154,9 @@ func TestRead_OffsetBeyondHW_EOF(t *testing.T) {
 }
 
 func TestReopen_RestoresOffsets(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
 	dir := t.TempDir()
-	pl, err := OpenPartition(dir, 128)
+	pl, err := OpenPartition(dir, 128, logger)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,7 +169,7 @@ func TestReopen_RestoresOffsets(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Reopen
-	pl2, err := OpenPartition(dir, 128)
+	pl2, err := OpenPartition(dir, 128, logger)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,8 +195,9 @@ func TestReopen_RestoresOffsets(t *testing.T) {
 }
 
 func TestAppendBatch_EmptyRejected(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
 	dir := t.TempDir()
-	pl, err := OpenPartition(dir, 1<<20)
+	pl, err := OpenPartition(dir, 1<<20, logger)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,8 +209,9 @@ func TestAppendBatch_EmptyRejected(t *testing.T) {
 }
 
 func TestConcurrent_ProduceConsume(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
 	dir := t.TempDir()
-	pl, err := OpenPartition(dir, 1024) // small-ish to cause some rollovers
+	pl, err := OpenPartition(dir, 1024, logger) // small-ish to cause some rollovers
 	if err != nil {
 		t.Fatal(err)
 	}

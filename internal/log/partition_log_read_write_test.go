@@ -4,11 +4,14 @@ import (
 	"io"
 	"sync"
 	"testing"
+
+	"go.uber.org/zap"
 )
 
 func TestAppendRead_RolloverAndLastOffset(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
 	dir := t.TempDir()
-	pl, err := OpenPartition(dir, 128) // small to force rollovers
+	pl, err := OpenPartition(dir, 128, logger) // small to force rollovers
 	if err != nil {
 		t.Fatalf("OpenPartition: %v", err)
 	}
@@ -55,7 +58,7 @@ func TestAppendRead_RolloverAndLastOffset(t *testing.T) {
 	if err := pl.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
-	pl2, err := OpenPartition(dir, 128)
+	pl2, err := OpenPartition(dir, 128, logger)
 	if err != nil {
 		t.Fatalf("reopen failed: %v", err)
 	}
@@ -69,8 +72,9 @@ func TestAppendRead_RolloverAndLastOffset(t *testing.T) {
 }
 
 func TestConcurrentProduceConsume(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
 	dir := t.TempDir()
-	pl, err := OpenPartition(dir, 4096)
+	pl, err := OpenPartition(dir, 4096, logger)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}

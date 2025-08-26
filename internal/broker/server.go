@@ -10,6 +10,8 @@ import (
 	"net"
 	"net/http"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -157,22 +159,25 @@ func (s *Server) ensurePartition(ctx context.Context, t string, p int32, require
 
 	s.partsMu.Lock()
 	pr, ok := s.parts[key]
-	s.partsMu.Unlock()
 	if ok {
+		s.partsMu.Unlock()
 		return pr, nil
 	}
 
 	st, err := s.store.GetPartitionState(ctx, t, int(p))
 	if err != nil {
+		s.partsMu.Unlock()
 		return nil, err
 	}
 	if requireLeader && st.Leader != s.cfg.Server.NodeID {
+		s.partsMu.Unlock()
 		return nil, fmt.Errorf("not leader: leader=%s", st.Leader)
 	}
 	// Open log storage
 	dir := filepath.Join(s.cfg.Storage.DataDir, t, fmt.Sprintf("%d", p))
-	pl, err := log.OpenPartition(dir, s.cfg.Storage.SegmentBytes)
+	pl, err := log.OpenPartition(dir, s.cfg.Storage.SegmentBytes, s.logger)
 	if err != nil {
+		s.partsMu.Unlock()
 		return nil, err
 	}
 	var rep *replication.Replicator
@@ -190,11 +195,11 @@ func (s *Server) ensurePartition(ctx context.Context, t string, p int32, require
 		}
 		rep, err = replication.NewReplicator(followers, dialOpt, s.cfg.Replication.QuorumAcks)
 		if err != nil {
+			s.partsMu.Unlock()
 			return nil, err
 		}
 	}
 	newPr := &Partition{Log: pl, LeaderEpoch: st.LeaderEpoch, ISR: followers, Rep: rep, logger: s.logger}
-	s.partsMu.Lock()
 	s.parts[key] = newPr
 	s.partsMu.Unlock()
 
@@ -204,7 +209,6 @@ func (s *Server) ensurePartition(ctx context.Context, t string, p int32, require
 // --- MQ gRPC implementation ---
 
 func (s *Server) Produce(ctx context.Context, req *proto.ProduceRequest) (*proto.ProduceResponse, error) {
-	fmt.Println("Got produce req")
 	s.logger.Debug("Got Produce request", zap.Any("topic", req.Topic))
 
 	// If partition not specified (-1), pick based on key hash
@@ -300,7 +304,6 @@ func (s *Server) Fetch(ctx context.Context, req *proto.FetchRequest) (*proto.Fet
 		return nil, err
 	}
 	res := &proto.FetchResponse{HighWatermark: hw}
-	// off := req.Offset
 
 	for _, r := range recs {
 		var m proto.Message
@@ -312,7 +315,6 @@ func (s *Server) Fetch(ctx context.Context, req *proto.FetchRequest) (*proto.Fet
 			Offset:  r.Off,
 			Message: &m,
 		})
-		// off++
 	}
 	s.logger.Debug("Fetch request successful",
 		zap.Any("topic", req.Topic),
@@ -342,9 +344,16 @@ func (s *Server) Metadata(ctx context.Context, req *proto.MetadataRequest) (*pro
 			}
 		}
 	}
-	brokerIDs := make([]string, 0, len(bs))
-	for id := range bs {
-		brokerIDs = append(brokerIDs, id)
+	brokerIDs := make([]*proto.Broker, 0, len(bs))
+	for id, addr := range bs {
+		parts := strings.Split(addr, ":")
+		host := parts[0]
+		port, _ := strconv.Atoi(parts[1])
+		brokerIDs = append(brokerIDs, &proto.Broker{
+			Id:   id,
+			Host: host,
+			Port: int32(port),
+		})
 	}
 	return &proto.MetadataResponse{Partitions: parts, Brokers: brokerIDs}, nil
 }

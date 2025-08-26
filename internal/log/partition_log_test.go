@@ -3,6 +3,8 @@ package log
 import (
 	"encoding/json"
 	"testing"
+
+	"go.uber.org/zap"
 )
 
 // type dummyMsg struct {
@@ -11,9 +13,10 @@ import (
 // }
 
 func TestPartitionLogAppendBatchAndReadFrom_Rollover(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
 	dir := t.TempDir()
 	segBytes := int64(128) // small to force rollover
-	pl, err := OpenPartition(dir, segBytes)
+	pl, err := OpenPartition(dir, segBytes, logger)
 	if err != nil {
 		t.Fatalf("OpenPartition: %v", err)
 	}
@@ -67,7 +70,7 @@ func TestPartitionLogAppendBatchAndReadFrom_Rollover(t *testing.T) {
 	}
 
 	// Re-open by calling OpenPartition again (simulate restart)
-	pl2, err := OpenPartition(dir, segBytes)
+	pl2, err := OpenPartition(dir, segBytes, logger)
 	if err != nil {
 		t.Fatalf("OpenPartition(reopen): %v", err)
 	}
@@ -81,8 +84,9 @@ func TestPartitionLogAppendBatchAndReadFrom_Rollover(t *testing.T) {
 }
 
 func TestPartitionLogReadFromPastHighWatermarkReturnsEOF(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
 	dir := t.TempDir()
-	pl, err := OpenPartition(dir, 1024*1024)
+	pl, err := OpenPartition(dir, 1024*1024, logger)
 	if err != nil {
 		t.Fatalf("OpenPartition: %v", err)
 	}

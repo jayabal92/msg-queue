@@ -2,7 +2,9 @@ package broker
 
 import (
 	"context"
+	"fmt"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -146,4 +148,185 @@ func TestProduceAndFetch(t *testing.T) {
 	if string(got.Value) != "v1" {
 		t.Fatalf("expected value v1 got %s", got.Value)
 	}
+}
+
+func TestBatchProduceAndFetch(t *testing.T) {
+	dir := t.TempDir()
+	_, client, cleanup := startTestBroker(t, dir)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// --- Batch Produce ---
+	msgs := []*proto.Message{
+		{Key: []byte("k1"), Value: []byte("v1")},
+		{Key: []byte("k2"), Value: []byte("v2")},
+		{Key: []byte("k3"), Value: []byte("v3")},
+	}
+	resp, err := client.Produce(ctx, &proto.ProduceRequest{
+		Topic:     "events",
+		Partition: 0,
+		Messages:  msgs,
+	})
+	if err != nil {
+		t.Fatalf("Produce error: %v", err)
+	}
+	if len(resp.Offsets) != 3 {
+		t.Fatalf("expected 3 offsets got %v", resp.Offsets)
+	}
+	for i, off := range resp.Offsets {
+		if off != int64(i) {
+			t.Fatalf("expected offset %d got %d", i, off)
+		}
+	}
+
+	// --- Batch Fetch ---
+	fresp, err := client.Fetch(ctx, &proto.FetchRequest{
+		Topic:       "events",
+		Partition:   0,
+		Offset:      0,
+		MaxMessages: 10,
+	})
+	if err != nil {
+		t.Fatalf("Fetch error: %v", err)
+	}
+	if len(fresp.Records) != 3 {
+		t.Fatalf("expected 3 records got %d", len(fresp.Records))
+	}
+	for i, rec := range fresp.Records {
+		expVal := []byte(fmt.Sprintf("v%d", i+1))
+		if string(rec.Message.Value) != string(expVal) {
+			t.Errorf("expected %s got %s", expVal, rec.Message.Value)
+		}
+	}
+}
+
+func TestConcurrentProduce(t *testing.T) {
+	dir := t.TempDir()
+	_, client, cleanup := startTestBroker(t, dir)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	const workers = 5
+	const msgsPerWorker = 10
+	total := workers * msgsPerWorker
+
+	var wg sync.WaitGroup
+	wg.Add(workers)
+
+	// Concurrent produce
+	for w := 0; w < workers; w++ {
+		go func(id int) {
+			defer wg.Done()
+			for i := 0; i < msgsPerWorker; i++ {
+				msg := &proto.Message{
+					Key:   []byte(fmt.Sprintf("k-%d-%d", id, i)),
+					Value: []byte(fmt.Sprintf("v-%d-%d", id, i)),
+				}
+				_, err := client.Produce(ctx, &proto.ProduceRequest{
+					Topic:     "events",
+					Partition: 0,
+					Messages:  []*proto.Message{msg},
+				})
+				if err != nil {
+					t.Errorf("worker %d produce error: %v", id, err)
+				}
+			}
+		}(w)
+	}
+	wg.Wait()
+
+	// Fetch all messages
+	fresp, err := client.Fetch(ctx, &proto.FetchRequest{
+		Topic:       "events",
+		Partition:   0,
+		Offset:      0,
+		MaxMessages: int32(total),
+	})
+	if err != nil {
+		t.Fatalf("Fetch error: %v", err)
+	}
+	if len(fresp.Records) != total {
+		t.Fatalf("expected %d records got %d", total, len(fresp.Records))
+	}
+
+	// Offsets must be sequential
+	for i, rec := range fresp.Records {
+		if rec.Offset != int64(i) {
+			t.Errorf("expected offset %d got %d", i, rec.Offset)
+		}
+	}
+}
+
+func TestConcurrentProduceAndFetch(t *testing.T) {
+	dir := t.TempDir()
+	_, client, cleanup := startTestBroker(t, dir)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	const workers = 3
+	const msgsPerWorker = 5
+	total := workers * msgsPerWorker
+
+	var wg sync.WaitGroup
+	wg.Add(workers)
+
+	// Produce in background
+	for w := 0; w < workers; w++ {
+		go func(id int) {
+			defer wg.Done()
+			for i := 0; i < msgsPerWorker; i++ {
+				msg := &proto.Message{
+					Key:   []byte(fmt.Sprintf("k-%d-%d", id, i)),
+					Value: []byte(fmt.Sprintf("v-%d-%d", id, i)),
+				}
+				_, err := client.Produce(ctx, &proto.ProduceRequest{
+					Topic:     "events",
+					Partition: 0,
+					Messages:  []*proto.Message{msg},
+				})
+				if err != nil {
+					t.Errorf("worker %d produce error: %v", id, err)
+				}
+				time.Sleep(50 * time.Millisecond) // stagger a bit
+			}
+		}(w)
+	}
+
+	// Concurrent fetch while producing
+	var fetchWg sync.WaitGroup
+	fetchWg.Add(1)
+	go func() {
+		defer fetchWg.Done()
+		seen := make(map[string]bool)
+		var lastOffset int64 = 0
+		for len(seen) < total {
+			fresp, err := client.Fetch(ctx, &proto.FetchRequest{
+				Topic:       "events",
+				Partition:   0,
+				Offset:      lastOffset,
+				MaxMessages: 10,
+			})
+			if err != nil {
+				t.Errorf("Fetch error: %v", err)
+				return
+			}
+			for _, rec := range fresp.Records {
+				seen[string(rec.Message.Key)] = true
+				lastOffset = rec.Offset + 1
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		if len(seen) != total {
+			t.Errorf("expected %d unique keys got %d", total, len(seen))
+		}
+	}()
+
+	wg.Wait()
+	fetchWg.Wait()
 }
