@@ -2,6 +2,8 @@ server:
   nodeId: "node-c"
   grpcAddr: "127.0.0.1:9094"
   httpAddr: "127.0.0.1:8082"
+  grpcAdvertisedAddr: "127.0.0.1:9094"
+
 
 storage:
   dataDir: "./data/node-c"

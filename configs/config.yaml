@@ -2,6 +2,8 @@ server:
   nodeId: broker-0
   grpcAddr: ":9092"
   httpAddr: ":8080"
+  grpcAdvertisedAddr: "broker-0.msg-queue-headless.msg-queue.svc.cluster.local:9092"
+
 storage:
   dataDir: "/var/lib/mq"
   segmentBytes: 1073741824

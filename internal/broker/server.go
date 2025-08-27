@@ -65,7 +65,7 @@ func NewServer(cfg config.Config, z *zap.Logger, etcd *clientv3.Client) *Server 
 
 func (s *Server) Start(ctx context.Context) error {
 	// Register to etcd with TTL
-	if err := s.store.RegisterBroker(ctx, s.cfg.Server.NodeID, s.cfg.Server.GRPCAddr, 10); err != nil {
+	if err := s.store.RegisterBroker(ctx, s.cfg.Server.NodeID, s.cfg.Server.GRPCAdvertisedAddr, 10); err != nil {
 		s.logger.Error("error in register broker", zap.Any("error", err))
 		return err
 	}
@@ -327,10 +327,13 @@ func (s *Server) Fetch(ctx context.Context, req *proto.FetchRequest) (*proto.Fet
 }
 
 func (s *Server) Metadata(ctx context.Context, req *proto.MetadataRequest) (*proto.MetadataResponse, error) {
+	s.logger.Debug("Got Metadata request", zap.Any("topic", req.Topics))
+
 	bs, err := s.store.ListBrokers(ctx)
 	if err != nil {
 		return nil, err
 	}
+	s.logger.Debug("broker list: ", zap.Any("brokers", bs))
 	parts := []*proto.TopicPartitionMeta{}
 	for _, t := range req.Topics {
 		td, err := s.store.GetTopic(ctx, t)
@@ -355,6 +358,8 @@ func (s *Server) Metadata(ctx context.Context, req *proto.MetadataRequest) (*pro
 			Port: int32(port),
 		})
 	}
+	s.logger.Debug("MetadataResponse ", zap.Any("Partitions", parts), zap.Any("brokers", brokerIDs))
+
 	return &proto.MetadataResponse{Partitions: parts, Brokers: brokerIDs}, nil
 }
 

@@ -30,6 +30,7 @@ config:
     nodeId: "$(POD_NAME)"  
     grpcAddr: "0.0.0.0:9092"   # listen on all interfaces
     httpAddr: "0.0.0.0:8080"
+    grpcAdvertisedAddr: "$(POD_NAME).msg-queue-headless.msg-queue.svc.cluster.local:9092"
 
   storage:
     dataDir: "/var/lib/msg-queue"  # PersistentVolume mount
@@ -41,9 +42,7 @@ config:
 
   etcd:
     endpoints:
-      - http://msg-queue-etcd-0.msg-queue-etcd-headless.msg-queue.svc.cluster.local:2379
-      - http://msg-queue-etcd-1.msg-queue-etcd-headless.msg-queue.svc.cluster.local:2379
-      - http://msg-queue-etcd-2.msg-queue-etcd-headless.msg-queue.svc.cluster.local:2379
+      - http://msg-queue-etcd-headless.msg-queue.svc.cluster.local:2379
     username: ""
     password: ""
     tls:

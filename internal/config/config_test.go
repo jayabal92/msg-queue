@@ -8,10 +8,10 @@ import (
 
 func TestConfigString(t *testing.T) {
 	c := Config{
-		Server:  ServerConfig{NodeID: "node1", GRPCAddr: "127.0.0.1:9000"},
+		Server:  ServerConfig{NodeID: "node1", GRPCAddr: "127.0.0.1:9000", GRPCAdvertisedAddr: "127.0.0.1:9000"},
 		Storage: StorageConfig{DataDir: "/tmp/data"},
 	}
-	want := "node=node1 grpc=127.0.0.1:9000 dataDir=/tmp/data"
+	want := "node=node1 grpc=127.0.0.1:9000 grpcsAdvrAddr=127.0.0.1:9000 dataDir=/tmp/data"
 	if got := c.String(); got != want {
 		t.Errorf("Config.String() = %v, want %v", got, want)
 	}

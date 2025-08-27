@@ -5,6 +5,7 @@ import (
 	"flag"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -65,6 +66,9 @@ func main() {
 	if err := yaml.Unmarshal(b, &cfg); err != nil {
 		logger.Fatal("invalid config yaml:", zap.Any("error", err))
 	}
+	cfg.Server.NodeID = expandPlaceholders(cfg.Server.NodeID)
+	cfg.Server.GRPCAdvertisedAddr = expandPlaceholders(cfg.Server.GRPCAdvertisedAddr)
+
 	logger.Info("config loaded:", zap.Any("config", cfg.String()))
 
 	logger.Info("connecting to etcd endpoints:", zap.Any("etcd endpoints", cfg.Etcd.Endpoints))
@@ -90,4 +94,12 @@ func main() {
 	if err := run(ctx, cfg, logger, etc, s); err != nil {
 		logger.Fatal("server error", zap.Error(err))
 	}
+}
+
+func expandPlaceholders(val string) string {
+	if strings.Contains(val, "$(POD_NAME)") {
+		podName := os.Getenv("POD_NAME")
+		return strings.ReplaceAll(val, "$(POD_NAME)", podName)
+	}
+	return val
 }

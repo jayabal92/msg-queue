@@ -15,9 +15,10 @@ type StorageConfig struct {
 }
 
 type ServerConfig struct {
-	GRPCAddr string `yaml:"grpcAddr"`
-	HTTPAddr string `yaml:"httpAddr"`
-	NodeID   string `yaml:"nodeId"`
+	GRPCAddr           string `yaml:"grpcAddr"`
+	HTTPAddr           string `yaml:"httpAddr"`
+	NodeID             string `yaml:"nodeId"`
+	GRPCAdvertisedAddr string `yaml:"grpcAdvertisedAddr"`
 }
 
 type EtcdConfig struct {
@@ -64,5 +65,5 @@ func (t TLSConfig) GRPCCredentials() (*tls.Config, error) {
 }
 
 func (c Config) String() string {
-	return fmt.Sprintf("node=%s grpc=%s dataDir=%s", c.Server.NodeID, c.Server.GRPCAddr, c.Storage.DataDir)
+	return fmt.Sprintf("node=%s grpc=%s grpcsAdvrAddr=%s dataDir=%s", c.Server.NodeID, c.Server.GRPCAddr, c.Server.GRPCAdvertisedAddr, c.Storage.DataDir)
 }
